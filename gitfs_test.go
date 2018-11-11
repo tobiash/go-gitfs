@@ -1,12 +1,12 @@
 package gitfs
 
 import (
+	"path/filepath"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
 	"testing"
-	"time"
 
 	"go.uber.org/zap"
 
@@ -38,7 +38,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestCommitFs(t *testing.T) {
-	repo := cloneTestRepo(t, "testdata/a")
+	repo := setupTestRepo(t)
 	defer repo.tearDown()
 	rwFs, err := NewRW(repo.Repository, plumbing.HEAD, func() afero.Fs { return afero.NewMemMapFs() })
 	assert.NoError(t, err)
@@ -72,7 +72,7 @@ func TestReadDirNames(t *testing.T) {
 }
 
 func TestReaddir(t *testing.T) {
-	repo := cloneTestRepo(t, "testdata/a")
+	repo := setupTestRepo(t)
 	defer repo.tearDown()
 
 	fs, err := NewROFromHEAD(repo.Repository)
@@ -95,7 +95,7 @@ func TestReaddir(t *testing.T) {
 }
 
 func TestReadfile(t *testing.T) {
-	repo := cloneTestRepo(t, "testdata/a")
+	repo := setupTestRepo(t)
 	defer repo.tearDown()
 
 	fs, err := NewROFromHEAD(repo.Repository)
@@ -105,73 +105,6 @@ func TestReadfile(t *testing.T) {
 	data, err := ioutil.ReadAll(file)
 	assert.NoError(t, err)
 	assert.Equal(t, "Foobar\n", string(data))
-}
-
-// var gfs afero.Fs = (*gitfs.GitFS)(nil)
-
-func TestWrite(t *testing.T) {
-	repo := initTestRepo(t)
-	fmt.Println(repo.path)
-	// defer repo.tearDown()
-	obj := repo.Storer.NewEncodedObject()
-	obj.SetType(plumbing.BlobObject)
-	wc, err := obj.Writer()
-	assert.NoError(t, err)
-	_, err = wc.Write([]byte("Hello World"))
-	assert.NoError(t, err)
-	assert.NoError(t, wc.Close())
-
-	index, err := repo.Storer.Index()
-	assert.NoError(t, err)
-
-	entry := index.Add("bla")
-	entry.Hash = obj.Hash()
-	entry.CreatedAt = time.Now()
-
-	h := &buildTreeHelper{s: repo.Storer}
-	tree, err := h.BuildTree(index)
-	assert.NoError(t, err)
-
-	commit := &object.Commit{
-		Author: object.Signature{
-			Email: "me@home",
-			Name:  "me",
-		},
-		Message:  "Test commit",
-		TreeHash: tree,
-	}
-
-	commitObj := repo.Storer.NewEncodedObject()
-	if err := commit.Encode(commitObj); err != nil {
-		t.Fatal(err)
-	}
-	commitHash, _ := repo.Storer.SetEncodedObject(commitObj)
-
-	head, err := repo.Storer.Reference(plumbing.HEAD)
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := plumbing.HEAD
-	if head.Type() != plumbing.HashReference {
-		name = head.Target()
-	}
-	ref := plumbing.NewHashReference(name, commitHash)
-	repo.Storer.SetReference(ref)
-}
-
-func cloneTestRepo(t *testing.T, path string) *testRepo {
-	name, err := ioutil.TempDir("", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	repo, err := git.PlainClone(name, true, &git.CloneOptions{
-		URL: path,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &testRepo{repo, name}
 }
 
 func initTestRepo(t *testing.T) *testRepo {
@@ -185,4 +118,36 @@ func initTestRepo(t *testing.T) *testRepo {
 		t.Fatal(err)
 	}
 	return &testRepo{repo, name}
+}
+
+func setupTestRepo(t *testing.T) *testRepo {
+	name, err := ioutil.TempDir("", "")
+	assert.NoError(t, err)
+	repo, err := git.PlainInit(name, false)
+	assert.NoError(t, err)
+	wt, err := repo.Worktree()
+	assert.NoError(t, err)
+	assert.NoError(t, os.MkdirAll(filepath.Join(name, "dir1/dir2"), 0755))
+	assert.NoError(t, os.MkdirAll(filepath.Join(name, "dir1/dir3"), 0755))
+	assert.NoError(t, os.MkdirAll(filepath.Join(name, "dir1/dir4"), 0755))
+	assert.NoError(t, touch(filepath.Join(name, "dir1/dir4/empty")))
+	assert.NoError(t, touch(filepath.Join(name, "dir1/dir3/empty")))
+	assert.NoError(t, ioutil.WriteFile(filepath.Join(name, "dir1/dir2/test"), []byte("Foobar\n"), 0644))
+	assert.NoError(t, wt.AddGlob("*"))
+	_, err = wt.Commit("first commit", &git.CommitOptions{
+		Author: &object.Signature{
+			Email: "me@home",
+			Name:  "me",
+		},
+	})
+	assert.NoError(t, err)
+	return &testRepo{repo, name}
+}
+
+func touch(path string) error {
+	f, err := os.OpenFile(path, os.O_RDONLY|os.O_CREATE, 0666)
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
